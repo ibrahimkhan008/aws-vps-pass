@@ -1,119 +1,100 @@
 #!/bin/bash
+set -euo pipefail
 
 echo "🔍 SSH Auto-Fix Script Starting..."
-
-USER_NAME=$(whoami)
-DEFAULT_PASS="${USER_NAME}@123"
-CHANGED=false
-
-echo "👤 User: $USER_NAME"
 echo "--------------------------------------"
 
-# STEP 1
-PASS_AUTH=$(sudo sshd -T | grep passwordauthentication)
-if [[ "$PASS_AUTH" == *"yes"* ]]; then
-    echo "✅ Step 1: PasswordAuthentication already enabled"
-else
-    echo "❌ Step 1: Fixing PasswordAuthentication..."
-    sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-    CHANGED=true
+if [[ $EUID -ne 0 ]]; then
+    echo "❌ Please run this script with sudo/root."
+    exit 1
 fi
 
-echo "--------------------------------------"
+# Fixed default password for BOTH accounts.
+DEFAULT_PASS="changeme@123"
 
-# STEP 2
-AUTH_METHOD=$(sudo sshd -T | grep authenticationmethods)
-if [[ "$AUTH_METHOD" == *"any"* ]]; then
-    echo "✅ Step 2: AuthenticationMethods already correct"
-else
-    echo "❌ Step 2: Fixing AuthenticationMethods..."
-    if grep -q "^AuthenticationMethods" /etc/ssh/sshd_config; then
-        sudo sed -i 's/^AuthenticationMethods.*/AuthenticationMethods any/' /etc/ssh/sshd_config
-    else
-        echo "AuthenticationMethods any" | sudo tee -a /etc/ssh/sshd_config > /dev/null
-    fi
-    CHANGED=true
+# When run as `sudo bash`, SUDO_USER is the account that originally
+# connected to the VPS (e.g. ubuntu, opc, ec2-user).
+CURRENT_USER="${SUDO_USER:-}"
+
+if [[ -z "$CURRENT_USER" || "$CURRENT_USER" == "root" ]]; then
+    echo "❌ Could not determine the current SSH user."
+    echo "Run the script with sudo from the user's SSH session."
+    exit 1
 fi
 
-echo "--------------------------------------"
-
-# STEP 3
-if grep -Eq "^[#]*PasswordAuthentication yes" /etc/ssh/sshd_config; then
-    echo "✅ Step 3: PasswordAuthentication already correct in main config"
-else
-    echo "❌ Step 3: Fixing PasswordAuthentication in main config..."
-    sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
-    CHANGED=true
+if ! id "$CURRENT_USER" >/dev/null 2>&1; then
+    echo "❌ User '$CURRENT_USER' does not exist."
+    exit 1
 fi
 
+echo "👤 Current SSH user: $CURRENT_USER"
+echo "👤 Root user: root"
 echo "--------------------------------------"
 
-# STEP 4
-if grep -Eq "^[#]*PermitRootLogin yes" /etc/ssh/sshd_config; then
-    echo "✅ Step 4: PermitRootLogin already correct"
-else
-    echo "❌ Step 4: Fixing PermitRootLogin..."
-    sudo sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
-    CHANGED=true
+echo "🔐 Setting password for $CURRENT_USER..."
+printf '%s:%s\n' "$CURRENT_USER" "$DEFAULT_PASS" | chpasswd
+echo "✅ Password set for $CURRENT_USER"
+
+echo "🔐 Setting password for root..."
+printf '%s:%s\n' "root" "$DEFAULT_PASS" | chpasswd
+echo "✅ Password set for root"
+
+echo "--------------------------------------"
+echo "🔧 Configuring SSH password authentication..."
+
+# Use a late override so provider/cloud-init settings don't override
+# these SSH authentication settings.
+OVERRIDE="/etc/ssh/sshd_config.d/99-password-auth.conf"
+
+cat > "$OVERRIDE" <<'EOF'
+# Managed by SSH Auto-Fix
+PasswordAuthentication yes
+KbdInteractiveAuthentication yes
+AuthenticationMethods any
+PermitRootLogin yes
+EOF
+
+chmod 644 "$OVERRIDE"
+
+echo "🧪 Validating SSH configuration..."
+if ! sshd -t; then
+    echo "❌ sshd configuration is invalid."
+    rm -f "$OVERRIDE"
+    exit 1
 fi
+echo "✅ SSH configuration valid"
 
 echo "--------------------------------------"
+echo "🔁 Restarting SSH..."
 
-# STEP 5
-echo "Step 5: 📁 Checking override configs..."
-
-if grep -q "^Include /etc/ssh/sshd_config.d/\*\.conf" /etc/ssh/sshd_config; then
-    for file in /etc/ssh/sshd_config.d/*.conf; do
-        if grep -q "PasswordAuthentication yes" "$file"; then
-            echo "✅ $file already correct"
-        else
-            echo "❌ Fixing $file"
-            sudo sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$file" || \
-            echo "PasswordAuthentication yes" | sudo tee -a "$file"
-            CHANGED=true
-        fi
-    done
+if systemctl restart ssh 2>/dev/null; then
+    echo "✅ SSH restarted"
+elif systemctl restart sshd 2>/dev/null; then
+    echo "✅ sshd restarted"
 else
-    echo "ℹ️ No override configs found"
-fi
-
-echo "--------------------------------------"
-
-# STEP 6
-if [ "$CHANGED" = true ]; then
-    echo "Step 6: 🔐 Changes detected → setting default password..."
-    echo "$USER_NAME:$DEFAULT_PASS" | sudo chpasswd
-    echo "✅ Password set to: $DEFAULT_PASS"
-else
-    echo "Step 6: 🟢 No changes needed → password NOT modified"
-fi
-
-echo "--------------------------------------"
-
-# Restart only if changed
-if [ "$CHANGED" = true ]; then
-    echo "🔁 Restarting SSH..."
-    sudo systemctl daemon-reload
-    sudo systemctl restart ssh.socket
-    sudo systemctl restart ssh
-else
-    echo "🔁 Restarting SSH... (skipped, already correct)"
+    echo "❌ Could not restart SSH service."
+    exit 1
 fi
 
 sleep 1
 
-# FINAL CHECK
-FINAL_PASS=$(sudo sshd -T | grep passwordauthentication)
-FINAL_AUTH=$(sudo sshd -T | grep authenticationmethods)
+echo "--------------------------------------"
+echo "📊 Final SSH Status:"
+sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|authenticationmethods|permitrootlogin) '
 
-echo "📊 Final Status:"
-echo "$FINAL_PASS"
-echo "$FINAL_AUTH"
-
-if [[ "$CHANGED" = false ]]; then
-    echo "🎉 System already correct No extra step need user can login using there pass!"
-else
-    echo "🎉 System fixed successfully"
-fi
-
+echo "--------------------------------------"
+echo "🎉 System fixed successfully"
+echo "👤 Current user: $CURRENT_USER"
+echo "👤 Root user: root"
+echo "🔑 Password for BOTH: $DEFAULT_PASS"
+echo ""
+echo "Test current user:"
+echo "  ssh ${CURRENT_USER}@YOUR_SERVER_IP"
+echo ""
+echo "Test root:"
+echo "  ssh root@YOUR_SERVER_IP"
+echo "--------------------------------------"
+echo "⚠️ Change the default password after testing:"
+echo "  passwd"
+echo "  sudo passwd root"
 echo "🚀 Done!"
