@@ -11,6 +11,7 @@ fi
 
 # Fixed default password for BOTH accounts.
 DEFAULT_PASS="changeme@123"
+PUBLIC_IP=$(curl -fsSL https://ifconfig.me)
 
 # When run as `sudo bash`, SUDO_USER is the account that originally
 # connected to the VPS (e.g. ubuntu, opc, ec2-user).
@@ -81,18 +82,19 @@ sleep 1
 echo "--------------------------------------"
 echo "📊 Final SSH Status:"
 sshd -T | grep -E '^(passwordauthentication|kbdinteractiveauthentication|authenticationmethods|permitrootlogin) '
-
 echo "--------------------------------------"
 echo "🎉 System fixed successfully"
 echo "👤 Current user: $CURRENT_USER"
 echo "👤 Root user: root"
 echo "🔑 Password for BOTH: $DEFAULT_PASS"
 echo ""
+echo "🌐 Public IP: $PUBLIC_IP"
+echo ""
 echo "Test current user:"
-echo "  ssh ${CURRENT_USER}@YOUR_SERVER_IP"
+echo "  ssh ${CURRENT_USER}@${PUBLIC_IP}"
 echo ""
 echo "Test root:"
-echo "  ssh root@YOUR_SERVER_IP"
+echo "  ssh root@${PUBLIC_IP}"
 echo "--------------------------------------"
 echo "⚠️ Change the default password after testing:"
 echo "  passwd"
